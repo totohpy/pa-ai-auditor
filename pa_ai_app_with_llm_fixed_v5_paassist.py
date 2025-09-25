@@ -1,23 +1,5 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
-
-def _gemini_generate(api_key: str, prompt: str, model: str = "gemini-1.5-flash"):
-    """เรียก Google Gemini แบบ REST API"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    payload = {
-        "contents": [
-            {"role": "user", "parts": [{"text": prompt}]}
-        ]
-    }
-    resp = requests.post(url, json=payload, timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        return str(data)
-
-
-import requests
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
@@ -25,6 +7,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
 import os
+import xlsxwriter
 
 st.set_page_config(page_title="Planning Studio (+ Issue Suggestions)", page_icon="🧭", layout="wide")
 
@@ -63,21 +46,68 @@ def df_download_link(df: pd.DataFrame, filename: str, label: str):
     df.to_csv(buf, index=False, encoding="utf-8-sig")
     st.download_button(label, data=buf.getvalue(), file_name=filename, mime="text/csv")
 
+def create_excel_template():
+    """Generates an Excel template file with two sheets: 'Data' and 'คำอธิบาย'."""
+    cols = [
+        "finding_id","report_id","year","unit","program",
+        "issue_title","issue_detail","cause_category","cause_detail",
+        "evidence_type","recommendation","outcomes_affected","kpi_touchpoints","severity"
+    ]
+    data_df = pd.DataFrame(columns=cols)
+    
+    # Create the "คำอธิบาย" sheet
+    descriptions = {
+        "finding_id": "รหัสของข้อตรวจพบ",
+        "report_id": "รหัสรายงาน",
+        "year": "ปีที่รายงาน",
+        "unit": "หน่วยงานที่ถูกตรวจสอบ",
+        "program": "ชื่อโครงการ/โปรแกรม",
+        "issue_title": "ชื่อประเด็นการตรวจสอบ",
+        "issue_detail": "รายละเอียดของประเด็น",
+        "cause_category": "หมวดหมู่ของสาเหตุ",
+        "cause_detail": "รายละเอียดของสาเหตุ",
+        "evidence_type": "ประเภทของหลักฐาน",
+        "recommendation": "ข้อเสนอแนะ",
+        "outcomes_affected": "ผลกระทบที่อาจเกิดขึ้น",
+        "kpi_touchpoints": "KPI ที่เกี่ยวข้อง",
+        "severity": "ระดับความรุนแรงของข้อตรวจพบ (1-5)"
+    }
+    desc_df = pd.DataFrame(list(descriptions.items()), columns=["Column Name", "Description"])
+
+    # Save to BytesIO object
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        data_df.to_excel(writer, sheet_name='Data', index=False)
+        desc_df.to_excel(writer, sheet_name='คำอธิบาย', index=False)
+    
+    # Return to the beginning of the stream
+    output.seek(0)
+    return output
+
 # ----------------- Findings Loader & Search -----------------
 @st.cache_data(show_spinner=False)
 def load_findings(default_path="FindingsLibrary.csv", uploaded=None):
     if uploaded is not None:
-        df = pd.read_csv(uploaded)
+        file_extension = os.path.splitext(uploaded.name)[1].lower()
+        if file_extension in [".xls", ".xlsx"]:
+            # แก้ไข: ระบุ sheet_name="Data" เพื่อให้ pandas อ่านเฉพาะชีตข้อมูล
+            try:
+                df = pd.read_excel(uploaded, sheet_name="Data")
+            except ValueError:
+                st.error("ไม่พบชีต 'Data' ในไฟล์ Excel ที่อัปโหลด กรุณาตรวจสอบไฟล์แม่แบบ")
+                df = pd.DataFrame()
+        elif file_extension == ".csv":
+            df = pd.read_csv(uploaded)
+        else:
+            st.warning("รูปแบบไฟล์ไม่ถูกต้อง กรุณาอัปโหลดไฟล์ CSV หรือ Excel")
+            df = pd.DataFrame()
     else:
         try:
+            # แก้ไข: ลองอ่านไฟล์ csv เป็นค่าเริ่มต้น
             df = pd.read_csv(default_path)
         except Exception as e:
             st.warning("ไม่พบไฟล์ FindingsLibrary.csv โปรดอัปโหลดไฟล์")
-            df = pd.DataFrame(columns=[
-                "finding_id","report_id","year","unit","program",
-                "issue_title","issue_detail","cause_category","cause_detail",
-                "evidence_type","recommendation","outcomes_affected","kpi_touchpoints","severity"
-            ])
+            df = pd.DataFrame()
     # Clean nulls
     for c in ["issue_title","issue_detail","cause_detail","recommendation","program","unit"]:
         if c in df.columns:
@@ -127,19 +157,19 @@ kpis_df = st.session_state["kpis"]
 risks_df = st.session_state["risks"]
 audit_issues_df = st.session_state["audit_issues"]
 
-st.title("🧭 Planning Studio – Performance Audit (with Issue Suggestions)")
+st.title("🧭 Planning Studio – Performance Audit (แนะนำประเด็นการตรวจสอบ)")
 
 tab_plan, tab_logic, tab_method, tab_kpi, tab_risk, tab_issue, tab_preview, tab_assist = st.tabs([
     "1) แผน & 6W2H", "2) Logic Model", "3) Methods", "4) KPIs", "5) Risks", "6) Issue Suggestions", "7) Preview/Export", "✨ PA Audit Assist ✨"
 ])
 
 with tab_plan:
-    st.subheader("ข้อมูลแผน (Plan)")
+    st.subheader("ข้อมูลแผน (Plan) กรุณาระบุข้อมูล")
     with st.container(border=True):
         c1, c2, c3 = st.columns([2,2,1])
         with c1:
             plan["plan_title"] = st.text_input("ชื่อแผน/เรื่องที่จะตรวจ", plan["plan_title"])
-            plan["program_name"] = st.text_input("ชื่อโครงการ/โปรแกรม", plan["program_name"])
+            plan["program_name"] = st.text_input("ชื่อโครงการ/แผนงาน", plan["program_name"])
             plan["objectives"] = st.text_area("วัตถุประสงค์การตรวจ", plan["objectives"])
         with c2:
             plan["scope"] = st.text_area("ขอบเขตการตรวจ", plan["scope"])
@@ -149,13 +179,14 @@ with tab_plan:
             plan["status"] = st.selectbox("สถานะ", ["Draft","Published"], index=0)
 
     st.divider()
-    st.subheader("6W2H")
+    st.subheader("6W2H กรุณาระบุข้อมูล")
 
     # ----- New Section for LLM Generation (text area) -----
     with st.container(border=True):
         st.markdown("##### 🚀 สร้าง 6W2H อัตโนมัติด้วย AI")
         st.write("คัดลอกและวางข้อความจากไฟล์ของคุณในช่องด้านล่างนี้")
-        uploaded_text = st.text_area("วางข้อความที่ต้องการให้ AI ช่วยสรุป 6W2H", height=200, key="uploaded_text")
+        uploaded_text = st.text_area("วางข้อความเกี่ยวกับเรื่องที่จะตรวจสอบ ที่ต้องการให้ AI ช่วยสรุป 6W2H", height=200, key="uploaded_text")
+        st.markdown("💡 **ยังไม่มี API Key?** คลิก [ที่นี่](https://playground.opentyphoon.ai/settings/api-key) เพื่อรับ key ฟรี!")
         api_key_6w2h = st.text_input("กรุณากรอก API Key เพื่อใช้บริการ AI:", type="password", key="api_key_6w2h")
 
         if st.button("🚀 สร้าง 6W2H จากข้อความ", type="primary"):
@@ -195,7 +226,7 @@ How Much: [ข้อความ]
                         llm_output = response.choices[0].message.content
                         
                         # Debugging section: Show raw LLM output
-                        with st.expander("แสดงผลลัพธ์ดิบจาก AI"):
+                        with st.expander("แสดงผลลัพธ์จาก AI"):
                             st.write(llm_output)
 
                         # Parse the LLM output with more flexibility and update session state
@@ -223,7 +254,7 @@ How Much: [ข้อความ]
                                 elif normalized_key == 'how':
                                     st.session_state.plan['how'] = value
 
-                        st.success("สร้าง 6W2H เรียบร้อยแล้ว! กรุณาตรวจสอบข้อมูลด้านล่าง")
+                        st.success("สร้าง 6W2H เรียบร้อยแล้ว! กรุณาตรวจสอบข้อมูลแล้วคัดลอกตามรายละเอียดด้านล่าง")
                         st.balloons()
                         # st.rerun() is no longer needed here as widgets will get updated automatically
                     except Exception as e:
@@ -249,7 +280,7 @@ How Much: [ข้อความ]
 # A separate loop is not required anymore.
 
 with tab_logic:
-    st.subheader("Logic Model: Input → Activities → Output → Outcome → Impact")
+    st.subheader("ระบุข้อมูล Logic Model: Input → Activities → Output → Outcome → Impact")
     st.dataframe(logic_df, use_container_width=True, hide_index=True)
     with st.expander("➕ เพิ่มรายการใน Logic Model"):
         with st.container(border=True):
@@ -274,7 +305,7 @@ with tab_logic:
                     st.rerun()
 
 with tab_method:
-    st.subheader("วิธีการเก็บข้อมูล (Methods)")
+    st.subheader("ระบุวิธีการเก็บข้อมูล (Methods)")
     st.dataframe(methods_df, use_container_width=True, hide_index=True)
     with st.expander("➕ เพิ่ม Method"):
         with st.container(border=True):
@@ -301,7 +332,7 @@ with tab_method:
                     st.rerun()
 
 with tab_kpi:
-    st.subheader("ตัวชี้วัด (KPIs)")
+    st.subheader("ระบุตัวชี้วัด (KPIs)")
     st.dataframe(kpis_df, use_container_width=True, hide_index=True)
     with st.expander("➕ เพิ่ม KPI เอง"):
         with st.container(border=True):
@@ -333,7 +364,7 @@ with tab_kpi:
                     st.rerun()
 
 with tab_risk:
-    st.subheader("ความเสี่ยง (Risks)")
+    st.subheader("ระบุความเสี่ยง (Risks)")
     st.dataframe(risks_df, use_container_width=True, hide_index=True)
     with st.expander("➕ เพิ่ม Risk"):
         with st.container(border=True):
@@ -361,7 +392,13 @@ with tab_risk:
 with tab_issue:
     st.subheader("🔎 แนะนำประเด็นตรวจจากรายงานเก่า (Issue Suggestions)")
     with st.container(border=True):
-        uploaded = st.file_uploader("อัปโหลด FindingsLibrary.csv (ถ้าไม่มีจะพยายามอ่านจากไฟล์ในโฟลเดอร์)", type=["csv"])
+        st.download_button(
+            label="⬇️ ดาวน์โหลดไฟล์แม่แบบ FindingsLibrary.xlsx",
+            data=create_excel_template(),
+            file_name="FindingsLibrary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        uploaded = st.file_uploader("อัปโหลด FindingsLibrary.csv หรือ .xlsx (ถ้าไม่มีจะพยายามอ่านจากไฟล์ในโฟลเดอร์)", type=["csv", "xlsx", "xls"])
         findings_df = load_findings(uploaded=uploaded)
         if findings_df.empty:
             st.stop()
@@ -380,6 +417,7 @@ Outcomes:{' | '.join(logic_df[logic_df['type']=='Outcome']['description'].tolist
         st.success(f"พบประเด็นที่เกี่ยวข้อง {len(results)} รายการ")
         
     results = st.session_state.get("issue_results", pd.DataFrame())
+    
     if not results.empty:
         st.divider()
         st.subheader("ผลลัพธ์การค้นหา")
@@ -397,10 +435,13 @@ Outcomes:{' | '.join(logic_df[logic_df['type']=='Outcome']['description'].tolist
                 with st.expander("รายละเอียด/ข้อเสนอแนะ (เดิม)"):
                     st.write(row["issue_detail"] if "issue_detail" in row else "-")
                     st.caption("ข้อเสนอแนะเดิม: " + (row["recommendation"] if "recommendation" in row and row["recommendation"] else "-"))
-                    impact = row["outcomes_impact"] if "outcomes_impact" in row else "-"
+                    impact = row["outcomes_affected"] if "outcomes_affected" in row else "-"
                     sim = row["sim_score"] if "sim_score" in row else 0
                     score = row["score"] if "score" in row else 0
-                    st.caption(f"ผลที่กระทบ: {impact}  •  score: {score:.3f} (sim={sim:.3f})")
+                    
+                    st.markdown(f"**ผลกระทบที่อาจเกิดขึ้น:** {impact}  •  <span style='color:red;'>**คะแนนความเกี่ยวข้อง**</span>: {score:.3f} (<span style='color:blue;'>**Similarity Score**</span>={sim:.3f})", unsafe_allow_html=True)
+                    st.caption("💡 **คำอธิบาย:** **คะแนนความเกี่ยวข้อง** (ยิ่งสูงยิ่งดี) = ความคล้ายคลึงของข้อความ + ความรุนแรงของปัญหา + ความใหม่ของข้อมูล")
+                    st.caption("**Similarity Score** คือค่าความคล้ายคลึงระหว่างข้อความในแผนงานของคุณกับรายงานเก่า (0.000 - 1.000)")
 
                 c1, c2 = st.columns([3,1])
                 with c1:
@@ -522,6 +563,7 @@ with tab_preview:
 
 with tab_assist:
     st.subheader("💡 PA Audit Assist (ขับเคลื่อนด้วย LLM)")
+    st.markdown("💡 **ยังไม่มี API Key?** คลิก [ที่นี่](https://playground.opentyphoon.ai/settings/api-key) เพื่อรับ key ฟรี!")
     api_key = st.text_input("กรุณากรอก API Key เพื่อใช้บริการ AI:", type="password")
 
     if st.button("🚀 สร้างคำแนะนำจาก AI", type="primary"):
@@ -580,7 +622,7 @@ Logic Model:
                     )
                     
                     messages = [
-                        {"role": "system", "content": "เจ้าหน้าที่สำนักงานการตรวจเงินแผ่นดิน ตรวจสอบผลสัมฤทธิ์และประสิทธิภาพการดำเนินงาน (Performance Audit)"},
+                        {"role": "system", "content": "การตรวจสอบผลสัมฤทธิ์และประสิทธิภาพการดำเนินงาน (Performance Audit)"},
                         {"role": "user", "content": user_prompt}
                     ]
                     
