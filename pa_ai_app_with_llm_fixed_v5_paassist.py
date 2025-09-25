@@ -398,7 +398,7 @@ with tab_issue:
             file_name="FindingsLibrary.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        uploaded = st.file_uploader("อัปโหลด FindingsLibrary.csv หรือ .xlsx (ถ้าไม่มีจะพยายามอ่านจากไฟล์ในโฟลเดอร์)", type=["csv", "xlsx", "xls"])
+        uploaded = st.file_uploader("อัปโหลด FindingsLibrary.csv หรือ .xlsx (ถ้าไม่มีจะอ่านจากฐานข้อมูลที่มีอยู่)", type=["csv", "xlsx", "xls"])
         findings_df = load_findings(uploaded=uploaded)
         if findings_df.empty:
             st.stop()
