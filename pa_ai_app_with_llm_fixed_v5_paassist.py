@@ -1,4 +1,23 @@
 import streamlit as st
+
+def _gemini_generate(api_key: str, prompt: str, model: str = "gemini-1.5-flash"):
+    """เรียก Google Gemini แบบ REST API"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": prompt}]}
+        ]
+    }
+    resp = requests.post(url, json=payload, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return str(data)
+
+
+import requests
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
