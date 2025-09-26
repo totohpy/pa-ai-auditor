@@ -8,9 +8,9 @@ import pandas as pd
 from io import StringIO
 
 # กำหนดค่าหน้าเว็บ
-st.set_page_config(page_title="🤖 PA Chatbot - Standalone RAG", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="🤖 Expert RAG Assistant", page_icon="🤖", layout="wide")
 
-# กำหนดโฟลเดอร์เอกสาร
+# กำหนดโฟลเดอร์เอกสารและข้อจำกัด
 DOC_FOLDER = "Doc" 
 MAX_CHARS_LIMIT = 100000
 
@@ -19,144 +19,194 @@ MAX_CHARS_LIMIT = 100000
 def init_state():
     """Initializes only the necessary session state variables for the chatbot."""
     ss = st.session_state
+    ss.setdefault("doc_context_local", "") # บริบทจากโฟลเดอร์ Doc
+    ss.setdefault("doc_context_uploaded", "") # บริบทจากไฟล์ที่อัปโหลด
+    
     # Initialize chat history
     ss.setdefault("chatbot_messages", [
-        {"role": "assistant", "content": "สวัสดีครับ ผมคือผู้ช่วย AI อัจฉริยะ ผมพร้อมตอบคำถามจากเอกสารในโฟลเดอร์ **'Doc'** แล้วครับ"}
+        {"role": "assistant", "content": "สวัสดีครับ ผมคือผู้ช่วย AI อัจฉริยะ ผมพร้อมตอบคำถามโดยอ้างอิงจากเอกสารในโฟลเดอร์ **'Doc'** และเอกสารที่คุณอัปโหลดครับ"}
     ])
-    ss.setdefault("doc_context", "")
     ss.setdefault("api_key_chatbot_standalone", st.secrets.get('OPENAI_API_KEY', ''))
 
 
-def read_pdf_text(file_path):
+def read_pdf_text_from_path(file_path):
     """Extracts text content from a PDF file using a local file path."""
     try:
-        # ต้องเปิดไฟล์ในโหมดไบนารี (rb) เพื่อส่งให้ PdfReader
         with open(file_path, 'rb') as file:
             reader = PdfReader(file)
             text = ""
             for page in reader.pages:
                 text += page.extract_text() or ""
             return text
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการอ่าน PDF: {e}")
+    except Exception:
         return ""
 
-
-def load_local_documents(folder_path, max_chars=MAX_CHARS_LIMIT):
-    """Reads all PDF, TXT, CSV files from a local folder and extracts text context."""
-    context = ""
-    total_chars = 0
+def read_pdf_text_from_uploaded(uploaded_file):
+    """Extracts text content from an uploaded PDF file."""
+    try:
+        reader = PdfReader(uploaded_file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        return text
+    except Exception:
+        return ""
     
-    # ค้นหาไฟล์ที่รองรับในโฟลเดอร์
-    supported_files = []
-    for ext in ['*.pdf', '*.txt', '*.csv']:
-        supported_files.extend(glob.glob(os.path.join(folder_path, ext)))
-        
-    if not supported_files:
-        return "", f"ไม่พบไฟล์ที่รองรับ (.pdf, .txt, .csv) ในโฟลเดอร์ '{folder_path}'"
-
-    for file_path in supported_files:
-        file_name = os.path.basename(file_path)
-        file_extension = os.path.splitext(file_name)[1].lower()
-        current_text = ""
-
+def get_text_from_file(file, source_type):
+    """Handles text extraction based on file source (local path or uploaded object)."""
+    file_name = file if source_type == 'local' else file.name
+    file_extension = os.path.splitext(file_name)[1].lower()
+    current_text = ""
+    
+    try:
         if file_extension == '.pdf':
-            current_text = read_pdf_text(file_path)
+            if source_type == 'local':
+                current_text = read_pdf_text_from_path(file)
+            else:
+                current_text = read_pdf_text_from_uploaded(file)
         elif file_extension == '.txt':
-            try:
-                # อ่านไฟล์ TXT ด้วย encoding เป็น UTF-8
-                with open(file_path, 'r', encoding='utf-8') as f:
+            if source_type == 'local':
+                with open(file, 'r', encoding='utf-8') as f:
                     current_text = f.read()
-            except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ {file_name}: {e}")
-                continue
+            else:
+                current_text = StringIO(file.getvalue().decode("utf-8")).read()
         elif file_extension == '.csv':
-            try:
-                # พยายามอ่าน CSV ด้วย UTF-8 (มาตรฐานสากล)
-                df = pd.read_csv(file_path, encoding='utf-8')
-                current_text = df.to_string()
-            except UnicodeDecodeError:
-                # หากเกิด DecodeError ให้ลองใช้ TIS-620 (มาตรฐานไทย)
+            if source_type == 'local':
                 try:
-                    df = pd.read_csv(file_path, encoding='TIS-620')
-                    current_text = df.to_string()
-                except Exception as e:
-                    # หากยังล้มเหลว แจ้งข้อผิดพลาดที่ชัดเจน
-                    st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ CSV {file_name} (ไม่รองรับ UTF-8/TIS-620): {e}")
-                    continue
-            except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ CSV {file_name}: {e}")
-                continue
+                    df = pd.read_csv(file, encoding='utf-8')
+                except UnicodeDecodeError:
+                    df = pd.read_csv(file, encoding='TIS-620')
+            else:
+                try:
+                    df = pd.read_csv(file, encoding='utf-8')
+                except UnicodeDecodeError:
+                    df = pd.read_csv(file, encoding='TIS-620')
+
+            current_text = df.to_string()
+    
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ {file_name}: {e}")
+        return "", ""
+
+    return current_text, file_name
+
+
+def process_documents(files, source_type, max_chars_limit, existing_context_len):
+    """Processes a list of files (either local paths or uploaded objects) and returns context."""
+    context = ""
+    total_chars = existing_context_len
+    
+    for file in files:
+        current_text, file_name = get_text_from_file(file, source_type)
         
         if current_text:
-            # การจำกัดจำนวนตัวอักษรยังคงอยู่
-            if total_chars + len(current_text) > max_chars:
-                remaining_chars = max_chars - total_chars
+            # ตรวจสอบขีดจำกัด
+            if total_chars + len(current_text) > max_chars_limit:
+                remaining_chars = max_chars_limit - total_chars
                 if remaining_chars > 0:
-                    # เพิ่มชื่อไฟล์ในส่วนที่ถูกตัดทอน เพื่อให้ AI ทราบว่ามีการดึงข้อมูลมาจากไฟล์ใดบ้าง
                     context += f"\n--- Start of Document: {file_name} (TRUNCATED) ---\n"
                     context += current_text[:remaining_chars] + f"\n... [ข้อความถูกตัดทอนจาก {file_name}]"
-                st.warning(f"จำกัดจำนวนข้อความที่นำเข้าที่ {max_chars:,} ตัวอักษร ข้อความที่เกินจะถูกตัดออก")
+                st.warning(f"จำกัดจำนวนข้อความที่นำเข้าที่ {max_chars_limit:,} ตัวอักษร ข้อความที่เกินจะถูกตัดออก")
                 break
             else:
-                # เพิ่มชื่อไฟล์เข้าไปในบริบท
                 context += f"\n--- Start of Document: {file_name} ---\n"
                 context += current_text
                 context += f"\n--- End of Document: {file_name} ---\n"
                 total_chars += len(current_text)
-                st.success(f"โหลดเอกสาร '{file_name}' ({len(current_text):,} ตัวอักษร)")
+                if source_type == 'local':
+                    st.toast(f"โหลด: {file_name} ({len(current_text):,} ตัวอักษร)")
+                else:
+                    st.toast(f"อัปโหลด: {file_name} ({len(current_text):,} ตัวอักษร)")
 
-    return context, f"ประมวลผลเสร็จสิ้น: โหลดไป {total_chars:,} ตัวอักษร"
+    return context, total_chars - existing_context_len # return เฉพาะส่วนที่เพิ่มใหม่
+
+def load_local_documents_on_init():
+    """Initial load function for Doc folder (run once)."""
+    supported_files = []
+    for ext in ['*.pdf', '*.txt', '*.csv']:
+        supported_files.extend(glob.glob(os.path.join(DOC_FOLDER, ext)))
+        
+    if not supported_files:
+        return ""
+
+    context, total_chars_added = process_documents(supported_files, 'local', MAX_CHARS_LIMIT, 0)
+    return context
 
 
 # ----------------- Main App Logic -----------------
 
-# 1. Initialize State
+# 1. Initialize State และโหลดเอกสารเริ่มต้น
 init_state()
+if not st.session_state.doc_context_local and not st.session_state.get('local_load_attempted', False):
+    # พยายามโหลดจาก Doc/ อัตโนมัติในครั้งแรก
+    st.session_state.doc_context_local = load_local_documents_on_init()
+    st.session_state.local_load_attempted = True
 
-st.title("🤖 PA Chatbot - Standalone RAG")
+st.title("🤖 Expert RAG Assistant (PA, ภูมิภาค/จังหวัด)")
 
 # 2. Sidebar for Configuration
 with st.sidebar:
     st.subheader("🛠️ ตั้งค่าการใช้งาน")
     
-    # Only show API input if it's not set via Streamlit secrets
+    # API Key Input
     if not st.session_state.api_key_chatbot_standalone:
         st.markdown("💡 **ยังไม่มี API Key?** คลิก [ที่นี่](https://playground.opentyphoon.ai/settings/api-key) เพื่อรับ key ฟรี!")
         st.session_state.api_key_chatbot_standalone = st.text_input(
-            "กรุณากรอก API Key:",
+            "กรุณากรอก OpenTyphoon API Key:",
             type="password",
             value=st.session_state.api_key_chatbot_standalone,
             key="api_key_input"
         )
     else:
-        st.success("API Key ถูกโหลดจาก Streamlit Secrets แล้ว")
-
+        st.success("API Key ถูกโหลดแล้ว")
 
     st.divider()
 
-    st.subheader(f"📂 โหลดเอกสารจากโฟลเดอร์ '{DOC_FOLDER}'")
-    st.info(f"ระบบจะอ่านไฟล์ **.pdf, .txt, .csv** ทั้งหมดในโฟลเดอร์ `{DOC_FOLDER}/`")
-
-    if st.button("โหลดและประมวลผลเอกสาร", type="primary"):
-        # เรียกใช้ฟังก์ชันใหม่เพื่อโหลดจากโฟลเดอร์
-        st.session_state.doc_context, status_msg = load_local_documents(DOC_FOLDER)
-        if not st.session_state.doc_context:
-             st.warning(status_msg)
-        else:
-             st.info(status_msg)
-
-    if st.session_state.doc_context:
-        st.success(f"บริบทเอกสารพร้อมใช้: {len(st.session_state.doc_context):,} ตัวอักษร (จำกัดที่ {MAX_CHARS_LIMIT:,} ตัวอักษร)")
-        if st.button("ล้างบริบทเอกสาร"):
-             st.session_state.doc_context = ""
-             st.rerun()
+    # สถานะบริบทจากโฟลเดอร์ Doc/
+    local_chars = len(st.session_state.doc_context_local)
+    if local_chars > 0:
+        st.success(f"📂 **Doc/** : โหลดแล้ว {local_chars:,} ตัวอักษร")
     else:
-        st.info("ยังไม่มีบริบทเอกสาร (Chatbot จะใช้ความรู้ทั่วไป)")
+        st.warning(f"📂 **Doc/** : ไม่พบเอกสารในโฟลเดอร์ '{DOC_FOLDER}'")
 
-    if st.button("ล้างประวัติแชท"):
+    st.subheader("⬆️ อัปโหลดเอกสารชั่วคราว (Ad-hoc)")
+    uploaded_files = st.file_uploader(
+        "อัปโหลดไฟล์ PDF, TXT, หรือ CSV (ใช้เฉพาะการสนทนานี้)",
+        type=["pdf", "txt", "csv"],
+        accept_multiple_files=True
+    )
+    
+    if st.button("ประมวลผลเอกสารที่อัปโหลด", type="primary"):
+        if uploaded_files:
+            # รวมความยาวบริบทเดิม (จาก Doc/) เพื่อคำนวณขีดจำกัด
+            existing_len = len(st.session_state.doc_context_local)
+            uploaded_context, chars_added = process_documents(uploaded_files, 'uploaded', MAX_CHARS_LIMIT, existing_len)
+            st.session_state.doc_context_uploaded = uploaded_context
+            if chars_added > 0:
+                 st.success(f"โหลดเอกสารที่อัปโหลดเสร็จสิ้น ({chars_added:,} ตัวอักษร)")
+            else:
+                 st.info("ไม่พบเอกสารที่ประมวลผลได้")
+
+        else:
+            st.session_state.doc_context_uploaded = ""
+            st.info("ไม่มีไฟล์ที่อัปโหลด")
+
+    uploaded_chars = len(st.session_state.doc_context_uploaded)
+    if uploaded_chars > 0:
+        st.info(f"💾 **Uploaded** : พร้อมใช้ {uploaded_chars:,} ตัวอักษร")
+        if st.button("ล้างเอกสารที่อัปโหลด"):
+             st.session_state.doc_context_uploaded = ""
+             st.rerun()
+    
+    st.divider()
+
+    # สรุปบริบทรวม
+    total_chars = local_chars + uploaded_chars
+    st.metric(label="บริบทรวมทั้งหมด (Max 100K)", value=f"{total_chars:,} ตัวอักษร")
+
+    if st.button("🗑️ ล้างประวัติแชททั้งหมด"):
         st.session_state.chatbot_messages = [
-             {"role": "assistant", "content": "สวัสดีครับ ผมคือผู้ช่วย AI อัจฉริยะ ผมพร้อมตอบคำถามจากเอกสารในโฟลเดอร์ **'Doc'** แล้วครับ"}
+             {"role": "assistant", "content": "สวัสดีครับ ผมคือผู้ช่วย AI อัจฉริยะ ผมพร้อมตอบคำถามโดยอ้างอิงจากเอกสารในโฟลเดอร์ **'Doc'** และเอกสารที่คุณอัปโหลดครับ"}
         ]
         st.rerun()
 
@@ -167,7 +217,7 @@ for message in st.session_state.chatbot_messages:
         st.markdown(message["content"])
 
 # 4. Chat Input and Processing
-if prompt := st.chat_input("สอบถามเกี่ยวกับการตรวจสอบ PA หรือเอกสารที่โหลดไว้..."):
+if prompt := st.chat_input("สอบถามเกี่ยวกับการตรวจสอบ หรือเอกสารที่โหลด/อัปโหลดไว้..."):
 
     # Check for API Key
     api_key = st.session_state.api_key_chatbot_standalone
@@ -175,6 +225,10 @@ if prompt := st.chat_input("สอบถามเกี่ยวกับกา�
     if not api_key:
         st.error("กรุณากรอก **API Key** ในแถบด้านข้าง (Sidebar) ก่อนใช้งาน")
         st.stop()
+    
+    # รวมบริบททั้งหมด: Doc/ + Uploaded (Uploaded จะถูกต่อท้าย)
+    full_doc_context = st.session_state.doc_context_local + st.session_state.doc_context_uploaded
+    doc_context = full_doc_context or "ไม่พบเอกสารภายใน"
 
     # Display user message
     st.session_state.chatbot_messages.append({"role": "user", "content": prompt})
@@ -192,13 +246,10 @@ if prompt := st.chat_input("สอบถามเกี่ยวกับกา�
                 )
 
                 # 2. Prepare RAG prompt
-                doc_context = st.session_state.doc_context or "ไม่พบเอกสารภายใน"
-
-                # *** System Prompt ตามที่ปรับปรุงล่าสุด ***
                 system_prompt = f"""
-คุณคือผู้ช่วย AI อัจฉริยะ (Expert Assistant) หน้าที่ของคุณคือตอบคำถามของผู้ใช้ให้ถูกต้องและครบถ้วนที่สุด โดยใช้แหล่งข้อมูลสองแหล่ง:
+คุณคือผู้ช่วย AI อัจฉริยะ (Expert Assistant) ที่เชี่ยวชาญการให้ข้อมูลเพื่อ **อ้างอิงการปฏิบัติงานสำหรับผู้ตรวจสอบของสำนักงานการตรวจเงินแผ่นดินภูมิภาคและจังหวัด** หน้าที่ของคุณคือตอบคำถามของผู้ใช้ให้ถูกต้องและครบถ้วนที่สุด โดยใช้แหล่งข้อมูลสองแหล่ง:
 1.  **ข้อมูลจากเอกสารภายใน (Primary Source):** นี่คือเนื้อหาที่ดึงมาจากไฟล์
- ในโฟลเดอร์ "Doc" ของระบบ จงยึดข้อมูลนี้เป็นหลักในการตอบคำถามเสมอ
+ ในโฟลเดอร์ "Doc" หรือที่ผู้ใช้เพิ่งอัปโหลด จงยึดข้อมูลนี้เป็นหลักในการตอบคำถามเสมอ
 2.  **ความรู้ทั่วไปและข้อมูลจากอินเทอร์เน็ต (Secondary Source):** หากคำตอบไม่มีอยู่ในเอกสารภายใน ให้ใช้ความรู้ที่คุณมีจากการฝึกฝน (ซึ่งเทียบเท่าการค้นหาข้อมูลบนอินเทอร์เน็ต) เพื่อตอบคำถาม
 
 **กฎการตอบ:**
@@ -213,7 +264,6 @@ if prompt := st.chat_input("สอบถามเกี่ยวกับกา�
 
 จากข้อมูลข้างต้นนี้ จงตอบคำถามล่าสุดของผู้ใช้
 """
-                # *** สิ้นสุด System Prompt ***
 
                 messages_for_api = [
                     {"role": "system", "content": system_prompt}
