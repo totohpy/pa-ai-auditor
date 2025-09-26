@@ -4,3 +4,4 @@ scikit-learn>=1.5
 openai>=1.37.0
 xlsxwriter
 openpyxl
+PyPDF2
