@@ -7,6 +7,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
 import os
+import io
 
 st.set_page_config(page_title="Planning Studio (+ Issue Suggestions)", page_icon="🧭", layout="wide")
 
@@ -28,6 +29,8 @@ def init_state():
     ss.setdefault("gen_issues", "")
     ss.setdefault("gen_findings", "")
     ss.setdefault("gen_report", "")
+    ss.setdefault("issue_results", pd.DataFrame())
+
 
 def next_id(prefix, df, col):
     if df.empty: return f"{prefix}-001"
@@ -49,7 +52,7 @@ def df_download_link(df: pd.DataFrame, filename: str, label: str):
 @st.cache_data(show_spinner=False)
 def load_findings(uploaded=None):
     findings_df = pd.DataFrame()
-    
+
     # 1. Try to load the pre-existing database file
     findings_db_path = "FindingsLibrary.csv"
     if os.path.exists(findings_db_path):
@@ -66,13 +69,13 @@ def load_findings(uploaded=None):
                 uploaded_df = pd.read_csv(uploaded)
             elif uploaded.name.endswith(('.xlsx', '.xls')):
                 uploaded_df = pd.read_excel(uploaded, sheet_name=0)
-            
+
             if not uploaded_df.empty:
                 findings_df = pd.concat([findings_df, uploaded_df], ignore_index=True)
                 st.success(f"อัปโหลดไฟล์ '{uploaded.name}' และรวมกับฐานข้อมูลเดิมแล้ว")
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ที่อัปโหลด: {e}")
-    
+
     # 3. Clean and return the combined dataframe
     if not findings_df.empty:
         for c in ["issue_title","issue_detail","cause_detail","recommendation","program","unit"]:
@@ -82,9 +85,8 @@ def load_findings(uploaded=None):
             findings_df["year"] = pd.to_numeric(findings_df["year"], errors="coerce").fillna(0).astype(int)
         if "severity" in findings_df.columns:
             findings_df["severity"] = pd.to_numeric(findings_df["severity"], errors="coerce").fillna(3).clip(1,5).astype(int)
-    
-    return findings_df
 
+    return findings_df
 
 @st.cache_resource(show_spinner=False)
 def build_tfidf_index(findings_df: pd.DataFrame):
@@ -113,6 +115,19 @@ def search_candidates(query_text, findings_df, vec, X, top_k=8):
     ]
     cols = [c for c in cols if c in out.columns] + ["sim_score"]
     return out.sort_values("score", ascending=False).head(top_k)[cols]
+    
+# Function to create an empty Excel template
+def create_excel_template():
+    df = pd.DataFrame(columns=[
+        "finding_id", "issue_title", "unit", "program", "year", 
+        "cause_category", "cause_detail", "issue_detail", "recommendation", 
+        "outcomes_impact", "severity"
+    ])
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='FindingsLibrary')
+    processed_data = output.getvalue()
+    return processed_data
 
 # ----------------- App UI -----------------
 init_state()
@@ -347,8 +362,14 @@ with tab_risk:
 
 with tab_issue:
     st.subheader("🔎 แนะนำประเด็นตรวจจากรายงานเก่า (Issue Suggestions)")
-    st.write("อัปโหลด FindingsLibrary.xlsx (ถ้าไม่มีจะอ่านจากไฟล์ FindingsLibrary.csv ที่มีอยู่เดิม)")
-    uploaded = st.file_uploader("", type=["csv","xlsx"], key="findings_uploader")
+    with st.container(border=True):
+        st.download_button(
+            label="⬇️ ดาวน์โหลดไฟล์แม่แบบ FindingsLibrary.xlsx",
+            data=create_excel_template(),
+            file_name="FindingsLibrary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        uploaded = st.file_uploader("อัปโหลด FindingsLibrary.csv หรือ .xlsx (ถ้าไม่มีจะพยายามอ่านจากไฟล์ในโฟลเดอร์)", type=["csv", "xlsx", "xls"])
     
     findings_df = load_findings(uploaded=uploaded)
     
@@ -357,101 +378,108 @@ with tab_issue:
     else:
         st.success(f"พบข้อมูล Findings ทั้งหมด {len(findings_df)} รายการ")
         vec, X = build_tfidf_index(findings_df)
-
-        st.divider()
-
-        st.write("กรอกข้อมูลที่เกี่ยวข้องกับงานที่ต้องการตรวจสอบ (จาก 6W2H, Logic Model, ฯลฯ)")
-        query_text = st.text_area("ข้อความเกี่ยวกับเรื่องที่จะตรวจสอบ", height=150, help="เช่น โครงการพัฒนาแอพพลิเคชันเพื่อให้บริการประชาชน")
-
-        if query_text:
-            candidate_df = search_candidates(query_text, findings_df, vec, X)
-            st.write("---")
-            st.markdown("#### ข้อตรวจพบที่เกี่ยวข้องจากฐานข้อมูล")
-            st.dataframe(candidate_df, use_container_width=True, hide_index=True)
-            
-            st.divider()
-            st.markdown("#### 🤖 สร้างคำแนะนำประเด็นการตรวจสอบจาก AI")
-            api_key = st.text_input("กรุณากรอก API Key เพื่อใช้บริการ AI:", type="password")
-
-            if st.button("🚀 สร้างคำแนะนำจาก AI", type="primary"):
-                if not api_key:
-                    st.error("กรุณากรอก API Key ก่อนใช้งาน")
-                else:
-                    with st.spinner("กำลังประมวลผล..."):
-                        try:
-                            client = OpenAI(
-                                api_key=api_key,
-                                base_url="https://api.opentyphoon.ai/v1"
-                            )
-                            prompt = f"""
-บทบาท: คุณคือผู้ช่วยนักตรวจสอบที่เชี่ยวชาญด้านการตรวจสอบผลการดำเนินงาน (Performance Audit)
-ภารกิจ: จากข้อมูลที่กำหนดให้ (ประเด็นตรวจสอบ และ ข้อตรวจพบเก่าที่เกี่ยวข้อง)
-- **แนะนำประเด็นการตรวจสอบ** ที่ควรให้ความสำคัญในปัจจุบัน โดยคำนึงถึงบริบทของการตรวจสอบผลการดำเนินงาน
-- **คาดการณ์ข้อตรวจพบที่อาจจะเกิดขึ้น** พร้อมระดับโอกาส (สูง, กลาง, ต่ำ) โดยใช้ข้อตรวจพบเก่าเป็นแนวทาง
-- **สรุปเป็นร่างรายงาน** (ประมาณ 100 คำ) โดยใช้ภาษาที่กระชับและตรงประเด็น
-
-ข้อความจากผู้ใช้งาน (ประเด็นตรวจสอบ):
----
-{query_text}
----
-
-ข้อตรวจพบเก่าที่เกี่ยวข้อง (ใช้เป็นแนวทาง):
----
-{candidate_df.to_string()}
----
-
-รูปแบบที่ต้องการ:
-##### ประเด็นการตรวจสอบที่ควรให้ความสำคัญ
-[รายการประเด็น]
-
-##### ข้อตรวจพบที่คาดว่าจะพบ (พร้อมระดับโอกาส)
-[รายการข้อตรวจพบ]
-
-##### ร่างรายงานตรวจสอบ (Preview)
-[ข้อความสรุป]
+        
+        # New manual search section from user's provided code
+        seed = f"""
+Who:{plan.get('who','')} What:{plan.get('what','')} Where:{plan.get('where','')}
+When:{plan.get('when','')} Why:{plan.get('why','')} How:{plan.get('how','')}
+Outputs:{' | '.join(logic_df[logic_df['type']=='Output']['description'].tolist())}
+Outcomes:{' | '.join(logic_df[logic_df['type']=='Outcome']['description'].tolist())}
 """
-
-                            messages = [{"role": "user", "content": prompt}]
-                            stream = client.chat.completions.create(
-                                model="typhoon-v2.1-12b-instruct",
-                                messages=messages,
-                                stream=True,
-                                temperature=0.7,
-                            )
-                            
-                            full_text = ""
-                            placeholder = st.empty()
-                            for chunk in stream:
-                                content = chunk.choices[0].delta.content or ""
-                                full_text += content
-                                placeholder.markdown(full_text)
-                            
-                            parts = full_text.split("#####")
-                            issues_text = "#####" + parts[1] if len(parts) > 1 else ""
-                            findings_text = "#####" + parts[2] if len(parts) > 2 else ""
-                            report_text = "#####" + parts[3] if len(parts) > 3 else ""
-                            
-                            st.session_state["gen_issues"] = issues_text
-                            st.session_state["gen_findings"] = findings_text
-                            st.session_state["gen_report"] = report_text
-
-                            st.success("สร้างคำแนะนำจาก AI เรียบร้อยแล้ว ✅")
-
-                        except Exception as e:
-                            st.error(f"เกิดข้อผิดพลาดในการเรียกใช้ AI: {e}")
-                            st.session_state["gen_issues"] = ""
-                            st.session_state["gen_findings"] = ""
-                            st.session_state["gen_report"] = ""
+        query_text = st.text_area("สรุปบริบท (แก้ไขได้):", seed, height=140)
         
-        st.markdown("<h4 style='color:blue;'>ประเด็นการตรวจสอบที่ควรให้ความสำคัญ</h4>", unsafe_allow_html=True)
-        st.markdown(f"<div style='color:green; border: 1px solid #ccc; padding: 10px; border-radius: 5px; height: 200px; overflow-y: scroll;'>{st.session_state.get('gen_issues', '')}</div>", unsafe_allow_html=True)
+        if st.button("ค้นหาประเด็นที่ใกล้เคียง", type="primary"):
+            results = search_candidates(query_text, findings_df, vec, X, top_k=8)
+            st.session_state["issue_results"] = results
+            st.success(f"พบประเด็นที่เกี่ยวข้อง {len(results)} รายการ")
+            
+        results = st.session_state.get("issue_results", pd.DataFrame())
         
-        st.markdown("<h4 style='color:blue;'>ข้อตรวจพบที่คาดว่าจะพบ (พร้อมระดับโอกาส)</h4>", unsafe_allow_html=True)
-        st.markdown(f"<div style='color:green; border: 1px solid #ccc; padding: 10px; border-radius: 5px; height: 200px; overflow-y: scroll;'>{st.session_state.get('gen_findings', '')}</div>", unsafe_allow_html=True)
-
-        st.markdown("<h4 style='color:blue;'>ร่างรายงานตรวจสอบ (Preview)</h4>", unsafe_allow_html=True)
-        st.markdown(f"<div style='color:green; border: 1px solid #ccc; padding: 10px; border-radius: 5px; height: 400px; overflow-y: scroll;'>{st.session_state.get('gen_report', '')}</div>", unsafe_allow_html=True)
-
+        if not results.empty:
+            st.divider()
+            st.subheader("ผลลัพธ์การค้นหา")
+            for i, row in results.reset_index(drop=True).iterrows():
+                with st.container(border=True):
+                    title_txt = row.get("issue_title", "(ไม่มีชื่อประเด็น)")
+                    unit_txt = row.get("unit", "-")
+                    prog_txt = row.get("program", "-")
+                    year_txt = int(row["year"]) if "year" in row and str(row["year"]).isdigit() else row.get("year", "-")
+                    st.markdown(f"**{title_txt}** \nหน่วย: {unit_txt} • โครงการ: {prog_txt} • ปี {year_txt}")
+                    cause_cat = row.get("cause_category", "-")
+                    cause_detail = row.get("cause_detail", "-")
+                    st.caption(f"สาเหตุ: *{cause_cat}* — {cause_detail}")
+    
+                    with st.expander("รายละเอียด/ข้อเสนอแนะ (เดิม)"):
+                        st.write(row.get("issue_detail", "-"))
+                        st.caption("ข้อเสนอแนะเดิม: " + (row.get("recommendation", "") or "-"))
+                        impact = row["outcomes_impact"] if "outcomes_impact" in row else "-"
+                        sim = row["sim_score"] if "sim_score" in row else 0
+                        score = row["score"] if "score" in row else 0
+                        
+                        st.markdown(f"**ผลกระทบที่อาจเกิดขึ้น:** {impact}  •  <span style='color:red;'>**คะแนนความเกี่ยวข้อง**</span>: {score:.3f} (<span style='color:blue;'>**Similarity Score**</span>={sim:.3f})", unsafe_allow_html=True)
+                        st.caption("💡 **คำอธิบาย:** **คะแนนความเกี่ยวข้อง** (ยิ่งสูงยิ่งดี) = ความคล้ายคลึงของข้อความ + ความรุนแรงของปัญหา + ความใหม่ของข้อมูล")
+                        st.caption("**Similarity Score** คือค่าความคล้ายคลึงระหว่างข้อความในแผนงานของคุณกับรายงานเก่า (0.000 - 1.000)")
+    
+                    c1, c2 = st.columns([3,1])
+                    with c1:
+                        default_rat = f"อ้างอิงกรณีเดิม ปี {year_txt} | หน่วย: {unit_txt}"
+                        st.text_area("เหตุผลที่ควรตรวจ (สำหรับแผนนี้)", key=f"rat_{i}", value=default_rat)
+                        st.text_input("KPI ที่เกี่ยว (ถ้ามี)", key=f"kpi_{i}")
+                        st.text_input("วิธีเก็บข้อมูลที่เสนอ", key=f"mth_{i}", value="สัมภาษณ์/สังเกต/ตรวจเอกสาร")
+    
+                    with c2:
+                        if st.button("➕ เพิ่มเข้าแผน", key=f"add_{i}", type="secondary"):
+                            rationale_val = st.session_state.get(f"rat_{i}", "")
+                            linked_kpi_val = st.session_state.get(f"kpi_{i}", "")
+                            proposed_methods_val = st.session_state.get(f"mth_{i}", "")
+                            issue_detail_val = row.get("issue_detail", "")
+                            recommendation_val = row.get("recommendation", "")
+    
+                            cols = ["issue_id","plan_id","title","rationale","linked_kpi","proposed_methods","source_finding_id","issue_detail","recommendation"]
+                            
+                            if "audit_issues" not in st.session_state or not isinstance(st.session_state["audit_issues"], pd.DataFrame):
+                                st.session_state["audit_issues"] = pd.DataFrame(columns=cols)
+                            
+                            # Ensure all columns exist in the target DataFrame
+                            for c in cols:
+                                if c not in st.session_state["audit_issues"].columns:
+                                    st.session_state["audit_issues"][c] = pd.Series(dtype="object")
+                            
+                            curr = st.session_state["audit_issues"]
+                            nums = []
+                            if not curr.empty and "issue_id" in curr.columns:
+                                for x in curr["issue_id"].astype(str):
+                                    if x.startswith("ISS-"):
+                                        try:
+                                            nums.append(int(x.split("-")[-1]))
+                                        except Exception:
+                                            pass
+                            new_id = f"ISS-{(max(nums) if nums else 0)+1:03d}"
+    
+                            title_val = title_txt
+                            finding_id = row.get("finding_id", "")
+    
+                            new = pd.DataFrame([{
+                                "issue_id": new_id,
+                                "plan_id": plan.get("plan_id",""),
+                                "title": title_val,
+                                "rationale": rationale_val,
+                                "linked_kpi": linked_kpi_val,
+                                "proposed_methods": proposed_methods_val,
+                                "source_finding_id": finding_id,
+                                "issue_detail": issue_detail_val,
+                                "recommendation": recommendation_val
+                            }])
+    
+                            st.session_state["audit_issues"] = pd.concat([st.session_state["audit_issues"], new], ignore_index=True)
+                            st.success("เพิ่มประเด็นเข้าแผนแล้ว ✅")
+                            st.rerun()
+                            
+        if not st.session_state.get("issue_results", pd.DataFrame()).empty:
+            st.divider()
+        st.markdown("### ประเด็นที่ถูกเพิ่มเข้าแผน")
+        st.dataframe(st.session_state["audit_issues"], use_container_width=True, hide_index=True)
+        
 with tab_preview:
     st.subheader("สรุปแผน (Preview)")
     with st.container(border=True):
@@ -515,10 +543,11 @@ with tab_preview:
     
 with tab_assist:
     st.subheader("💡 PA Audit Assist (ขับเคลื่อนด้วย LLM)")
+    st.write("🤖 สร้างคำแนะนำประเด็นการตรวจสอบจาก AI")
     st.markdown("💡 **ยังไม่มี API Key?** คลิก [ที่นี่](https://playground.opentyphoon.ai/settings/api-key) เพื่อรับ key ฟรี!")
-    api_key = st.text_input("กรุณากรอก API Key เพื่อใช้บริการ AI:", type="password")
+    api_key = st.text_input("กรุณากรอก API Key เพื่อใช้บริการ AI:", type="password", key="api_key_assist")
 
-    if st.button("🚀 สร้างคำแนะนำจาก AI", type="primary"):
+    if st.button("🚀 สร้างคำแนะนำจาก AI", type="primary", key="llm_assist_button"):
         if not api_key:
             st.error("กรุณากรอก API Key ก่อนใช้งาน")
         else:
